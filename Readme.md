@@ -138,13 +138,13 @@ nsys profile -o nsys_report --stats=true ./benchmarks/profiling_timeline
 
 ![Benchmark TFLOPS](benchmarks/results/throughput.png)
 
-**Throughput interpretation**
+#### Throughput interpretation
 The table and plot show a clear crossover: at 256 the custom kernel is faster (1.69 TFLOPS vs 1.28 TFLOPS, 1.32x), while from 512 onward it falls behind. The growth in custom TFLOPS (1.69 → 3.42) is modest compared to cuBLAS (1.28 → 20.17), so the relative gap widens as matrix size increases. This is consistent with a kernel that performs well at small sizes but lacks the deeper tiling, multi-warp scheduling, and pipelining that cuBLAS uses to scale on large matrices.
 
 **Roofline**
 ![Benchmark TFLOPS](benchmarks/results/roofline.png)
 
-**Roofline interpretation**
+#### Roofline interpretation
 Read the roofline left-to-right as arithmetic intensity increases: performance should rise until it approaches the compute roof. The custom kernel points sit noticeably below the roof, which aligns with the throughput table showing lower TFLOPS than cuBLAS at larger sizes. The vertical gap to the roof indicates headroom from memory access patterns and execution efficiency (shared-memory staging, occupancy, pipeline depth). cuBLAS is closer to the roofline, reflecting more complete optimization for both memory bandwidth and compute utilization.
 
 **Latency**
@@ -157,10 +157,10 @@ Read the roofline left-to-right as arithmetic intensity increases: performance s
 
 ![Benchmark TFLOPS](benchmarks/results/latency.png)
 
-**Latency interpretation**
+#### Latency interpretation
 The latency table mirrors the throughput crossover: the custom kernel is faster at 256 (0.024 ms vs 0.033 ms), but becomes significantly slower as sizes grow. The ratio climbs from 2.73x at 512 to 5.75x at 2048, which is the inverse of the throughput gap. This pattern indicates that fixed overheads are not the dominant issue; instead, the kernel’s steady-state efficiency at scale is the bottleneck.
 
-**Overall interpretation**
+#### Overall interpretation
 At small sizes (256) the kernel is competitive, while for larger sizes it trails cuBLAS. This is expected for a custom kernel without the full set of optimizations present in production libraries. The current results serve as a baseline for targeted optimization and demonstrate the full engineering cycle rather than claiming to beat cuBLAS today.
 
 ## Reproducibility notes
