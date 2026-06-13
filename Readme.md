@@ -1,153 +1,79 @@
-# CUDA INT8 WMMA GEMM Kernel
+# WMMA INT8 GEMM
+This project implements a WMMA-based INT8 GEMM kernel for CUDA and PyTorch. It is designed as a compact, production-style example of GPU kernel engineering, systems integration, correctness validation, and performance analysis.
 
-This repo is a portfolio project: although my professional background is distributed systems and cloud computing, it demonstrates that I can design, implement, validate, benchmark, and profile an optimized CUDA kernel end-to-end.
+## Demonstrated Capabilities
 
-**What this project demonstrates**
-1. Kernel design for Tensor Cores (WMMA INT8).
-2. Correctness validation against a reference implementation.
-3. Performance measurement (throughput, latency, roofline).
-4. Profiling and iterative optimization planning.
-5. Clean packaging as a PyTorch C++/CUDA extension.
+- **Kernel Design**: WMMA-based INT8 GEMM with 16x16x16 tiling, int32 accumulation, and FP16 output.
+- **Systems Integration**: PyTorch C++/CUDA extension with a minimal Python API and strict runtime checks.
+- **Performance Analysis**: throughput, latency, and roofline benchmarking against PyTorch's INT8 path.
+- **Correctness Engineering**: reference validation, edge-case coverage, determinism checks, and invalid-input tests.
+- **Production Deployment Readiness**: clean packaging, explicit tensor/layout contracts, and a drop-in API for larger inference stacks.
 
-**Quick links:** [Build & run](#build--run) | [Correctness tests](#correctness-tests) | [Benchmarks](#benchmarks-methodology) | [Results & interpretation](#results--interpretation) | [Roadmap](#roadmap)
+## Architecture & Design Decisions
 
-**Technical highlights**
-- WMMA INT8 kernel using 16x16x16 tiles with explicit row/column-major layouts.
-- Shared-memory tiling with padding for alignment, vectorized int4 loads, and scalar edge handling.
-- Per-column dequantization (`scaleA` scalar + `scaleB` vector) with FP16 output.
-- PyTorch C++/CUDA extension with strict input validation and minimal Python API.
+### Execution Flow
 
-**Example (PyTorch)**
-```
-import torch
-import gemm_api
-
-M, K, N = 64, 64, 64
-A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
-B_col = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
-scaleA = 0.1
-scaleB = torch.full((N,), 0.2, device="cuda", dtype=torch.float32)
-
-C = gemm_api.wmma_int8_gemm(A, B_col, scaleA, scaleB)
-print(C.shape, C.dtype)
+```text
+Python
+  -> gemm_api.wmma_int8_gemm
+  -> C++ binding
+  -> CUDA launcher
+  -> WMMA kernel
+  -> FP16 output
 ```
 
-**Environment expectations**
-- NVIDIA GPU with Tensor Core INT8 support (SM75+ recommended).
-- PyTorch build with CUDA enabled; CUDA toolkit/driver compatible with the PyTorch build.
+The flow is intentionally small and explicit so each layer can be inspected independently during debugging, profiling, or integration work.
 
-**Benchmark plots:** [Throughput](benchmarks/results/throughput.png) | [Latency](benchmarks/results/latency.png) | [Roofline](benchmarks/results/roofline.png)
+### Memory Layout
 
-## Engineering lifecycle (what I executed)
-1. **Problem framing**: INT8 GEMM with per-column dequantization, aiming for Tensor Core usage.
-2. **Kernel design**: WMMA tiling, shared-memory staging, alignment strategy, edge handling.
-3. **Correctness**: reference comparison and deterministic checks.
-4. **Performance**: throughput/latency/roofline benchmarks against cuBLAS.
-5. **Profiling**: Nsight Systems timeline to identify bottlenecks.
-6. **Iteration plan**: concrete optimization roadmap (see below).
+- **A**: `int8`, row-major, contiguous, shape `[M, K]`
+- **B**: `int8`, column-major, contiguous transpose, shape `[N, K]`
+- **scaleA**: scalar `float`
+- **scaleB**: `float32` CUDA tensor, shape `[N]`
+- **Output**: `FP16`, shape `[M, N]`
 
-## Architecture overview
-```
-Python API (python/gemm_api.py)
-    -> C++ binding (csrc/gemm_kernel.cpp)
-        -> CUDA launcher (csrc/gemm_kernel_cuda.cu)
-            -> WMMA kernel (kernels/GEMMKernel.cu)
-```
+The column-major `B` layout matches WMMA access patterns and avoids hidden transposes inside the kernel.
 
-1. `python/gemm_api.py` exposes `wmma_int8_gemm` to Python and loads the compiled extension.
-2. `csrc/gemm_kernel.cpp` validates shapes/dtypes/layouts and forwards to the CUDA entrypoint.
-3. `csrc/gemm_kernel_cuda.cu` launches `wmmaInt8GemmKernel` from `kernels/GEMMKernel.cu`.
-4. `kernels/GEMMKernel.cu` loads tiles into shared memory, executes WMMA, and dequantizes to FP16.
-5. `triton_deploy/wmma_gemm_repository/1/model.py` shows how to serve the same API via Triton.
+### Engineering Trade-offs
 
-## Kernel details (WMMA INT8)
-- **Tiling and WMMA**: 16x16x16 tiles with one warp per block, mapping exactly to Tensor Core WMMA fragments.
-- **Shared memory**: A and B tiles are staged in shared memory; padding keeps the stride aligned for WMMA loads.
-- **Alignment and loads**: 16-byte aligned int4 vector loads when possible, with scalar fallbacks for edges.
-- **Dequantization**: Accumulate in int32, then dequantize with `scaleA * scaleB[col]` into FP16 output.
+- Shared-memory staging gives predictable reuse, even if it leaves some occupancy on the table.
+- `int4` vector loads are used when alignment allows; scalar fallback keeps edge cases correct.
+- Accumulation stays in `int32` until the final dequantization step to preserve precision.
+- The current kernel is a baseline by design: conservative enough to validate, profile, and improve systematically.
 
-## Inputs/outputs and layout assumptions
-- **A**: int8 CUDA tensor `[M, K]` row-major, contiguous.
-- **B**: int8 CUDA tensor `[N, K]` column-major (stored as a contiguous transpose).
-- **scaleA**: Python float; **scaleB**: float32 CUDA tensor `[N]`.
-- **Output**: FP16 CUDA tensor `[M, N]`.
-- All tensors must be on the same CUDA device and contiguous; `scaleB` length must equal `N`.
+## Performance Results & Interpretation
 
-## Design decisions and tradeoffs
-- **Column-major B** matches WMMA col-major requirements and avoids per-tile transposes in the kernel.
-- **Shared-memory staging** prioritizes predictable access patterns over larger register pressure.
-- **int4 vector loads** improve bandwidth when aligned; scalar fallback handles boundaries safely.
-- **Explicit dequantization** preserves accumulator precision in int32 and makes scaling explicit.
+Benchmarks use fixed square matrices (`256, 512, 1024, 2048`) with 10 warmup iterations and 50 timed iterations. The current baseline is measured against PyTorch's INT8 matmul path.
 
-## Build & run
-Requirements: PyTorch with CUDA + NVIDIA GPU with Tensor Core INT8 support (SM75+ recommended).
+### Throughput
 
-```
-python setup.py build_ext --inplace
-PYTHONPATH=./python python - <<'PY'
-import torch
-import gemm_api
-
-M, K, N = 64, 64, 64
-A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
-B_row = torch.randint(-128, 127, (K, N), device="cuda", dtype=torch.int8)
-B_col = B_row.t().contiguous()
-scaleA = 0.1
-scaleB = torch.full((N,), 0.2, device="cuda", dtype=torch.float32)
-
-C = gemm_api.wmma_int8_gemm(A, B_col, scaleA, scaleB)
-print(C.shape, C.dtype)
-PY
-```
-
-## Correctness tests
-Tests compare against a PyTorch int8 GEMM reference (`torch._int_mm`/`torch.ops.aten._int_mm`) plus identical dequantization. They cover edge sizes, random stress, determinism, and invalid-input validation.
-
-```
-python tests/test_gemm_kernel.py
-```
-
-Run a single test group:
-```
-python -c "import torch; from tests.test_gemm_kernel import test_happy_paths; test_happy_paths(torch.device('cuda'))"
-```
-
-## Benchmarks methodology
-Benchmarks run fixed square sizes (256, 512, 1024, 2048), warm up 10 iterations, then time 50 iterations. Baselines use PyTorch int8 GEMM (`torch._int_mm`/`torch.ops.aten._int_mm`, backed by cuBLAS/cuBLASLt) with the same inputs and scales for direct comparison.
-
-```
-python benchmarks/throughput.py
-python benchmarks/latency.py
-python benchmarks/roofline.py
-```
-
-Profiling timeline:
-```
-nvcc benchmarks/profiling_timeline.cu kernels/GEMMKernel.cu -I kernels -std=c++14 -arch=sm_75 -o benchmarks/profiling_timeline
-nsys profile -o nsys_report --stats=true ./benchmarks/profiling_timeline
-```
-
-## Results & interpretation
-**Throughput**
 | Matrix Size | Custom Kernel (TFLOPS) | cuBLAS INT8 (TFLOPS) | Speedup vs cuBLAS INT8 (x) |
-|-----------:|--------------------:|--------------------:|---------------------------:|
+|-----------:|------------------------:|---------------------:|---------------------------:|
 | 256 | 1.69 | 1.28 | 1.32x |
 | 512 | 2.23 | 6.21 | 0.36x |
 | 1024 | 2.69 | 14.04 | 0.19x |
 | 2048 | 3.42 | 20.17 | 0.17x |
 
-![Benchmark TFLOPS](benchmarks/results/throughput.png)
+#### Plot
 
-#### Throughput interpretation
-The table and plot show a clear crossover: at 256 the custom kernel is faster (1.69 TFLOPS vs 1.28 TFLOPS, 1.32x), while from 512 onward it falls behind. The growth in custom TFLOPS (1.69 → 3.42) is modest compared to cuBLAS (1.28 → 20.17), so the relative gap widens as matrix size increases. This is consistent with a kernel that performs well at small sizes but lacks the deeper tiling, multi-warp scheduling, and pipelining that cuBLAS uses to scale on large matrices.
+![Throughput](benchmarks/results/throughput.png)
 
-**Roofline**
-![Benchmark TFLOPS](benchmarks/results/roofline.png)
+#### Interpretation
 
-#### Roofline interpretation
-Read the roofline left-to-right as arithmetic intensity increases: performance should rise until it approaches the compute roof. The custom kernel points sit noticeably below the roof, which aligns with the throughput table showing lower TFLOPS than cuBLAS at larger sizes. The vertical gap to the roof indicates headroom from memory access patterns and execution efficiency (shared-memory staging, occupancy, pipeline depth). cuBLAS is closer to the roofline, reflecting more complete optimization for both memory bandwidth and compute utilization.
+The kernel is competitive at 256 and then falls behind as the matrices grow. That is a useful interview signal: the implementation works, the Tensor Core path is real, and the scaling gap points directly to missing production-grade optimizations such as deeper tiling, pipelining, and better warp scheduling.
 
-**Latency**
+### Roofline
+
+#### Plot
+
+![Roofline](benchmarks/results/roofline.png)
+
+#### Interpretation
+
+The custom kernel sits below the compute roof, which means there is still headroom in memory movement and execution efficiency. In practice, this says the current design is valid but not yet fully optimized for large-shape inference workloads.
+
+### Latency
+
 | Matrix Size | Custom Kernel (ms) | cuBLAS INT8 (ms) | Latency Ratio vs cuBLAS INT8 (x) |
 |-----------:|-------------------:|----------------:|---------------------------------:|
 | 256 | 0.024 | 0.033 | 0.74x |
@@ -155,33 +81,59 @@ Read the roofline left-to-right as arithmetic intensity increases: performance s
 | 1024 | 1.011 | 0.194 | 5.21x |
 | 2048 | 4.812 | 0.837 | 5.75x |
 
-![Benchmark TFLOPS](benchmarks/results/latency.png)
+#### Plot
 
-#### Latency interpretation
-The latency table mirrors the throughput crossover: the custom kernel is faster at 256 (0.024 ms vs 0.033 ms), but becomes significantly slower as sizes grow. The ratio climbs from 2.73x at 512 to 5.75x at 2048, which is the inverse of the throughput gap. This pattern indicates that fixed overheads are not the dominant issue; instead, the kernel’s steady-state efficiency at scale is the bottleneck.
+![Latency](benchmarks/results/latency.png)
 
-#### Overall interpretation
-At small sizes (256) the kernel is competitive, while for larger sizes it trails cuBLAS. This is expected for a custom kernel without the full set of optimizations present in production libraries. The current results serve as a baseline for targeted optimization and demonstrate the full engineering cycle rather than claiming to beat cuBLAS today.
+#### Interpretation
 
-## Reproducibility notes
-To capture your environment for reproducible results:
+Latency tells the same story as throughput: the kernel can win on small inputs, but steady-state efficiency becomes the bottleneck as size increases. That is exactly the kind of result I want in a portfolio piece, because it shows I can measure a limitation, explain it, and turn it into an optimization plan.
+
+## Correctness & Validation
+
+The test suite compares the kernel against a PyTorch INT8 reference with identical dequantization. It covers normal shapes, tile-boundary sizes, random non-square stress, scale extremes, determinism, and invalid-input checks.
+
+Single-command test run:
+
+```bash
+python tests/test_gemm_kernel.py
 ```
-python - <<'PY'
+
+## Quick Start
+
+### Requirements
+
+- NVIDIA GPU with Tensor Core INT8 support (SM75+ recommended)
+- CUDA-enabled PyTorch install
+- Compatible CUDA toolkit and driver
+
+### Build
+
+```bash
+python setup.py build_ext --inplace
+```
+
+### Example Usage
+
+```python
 import torch
-print("Torch:", torch.__version__)
-print("CUDA:", torch.version.cuda)
-print("GPU:", torch.cuda.get_device_name(0))
-PY
+import gemm_api
+
+A = torch.randint(-128, 127, (64, 64), device="cuda", dtype=torch.int8)
+B = torch.randint(-128, 127, (64, 64), device="cuda", dtype=torch.int8).t().contiguous()
+scaleB = torch.full((64,), 0.2, device="cuda", dtype=torch.float32)
+
+C = gemm_api.wmma_int8_gemm(A, B, 0.1, scaleB)
+print(C.shape, C.dtype)
 ```
 
-## Roadmap
-1. Increase occupancy with multi-warp blocks and improved warp-level scheduling.
-2. Pipeline shared-memory loads (double buffering) to hide memory latency.
-3. Explore split-K and larger tiles to improve arithmetic intensity for big matrices.
-4. Tune epilogue to reduce write bandwidth and fuse scaling.
-5. Add more benchmark shapes (non-square, tall/skinny, wide/short).
+## Optimization Roadmap
 
-## Limitations and scope
-- Supports only INT8 inputs with FP16 output; no FP16/FP32 variants.
-- Expects **B** in column-major layout (`[N, K]` contiguous transpose).
-- Targets a single GPU; no multi-GPU or distributed execution support.
+The current kernel is intentionally a strong baseline, not the final form.
+
+- Add multi-warp blocks and warp specialization to raise occupancy.
+- Use `cp.async` double buffering to overlap global memory movement with Tensor Core compute.
+- Explore split-K and larger tile shapes to improve arithmetic intensity on large matrices.
+- Fuse epilogue work such as scaling, bias, or activation to reduce write bandwidth.
+- Autotune tile size, stage count, and launch configuration per GPU generation.
+- Extend the implementation into a serving backend once the kernel profile is stable.
