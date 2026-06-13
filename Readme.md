@@ -1,4 +1,4 @@
-# WMMA INT8 GEMM
+# WMMA INT8 GEMM: CUDA Native GEMM for NVIDIA GPUs
 This project implements a WMMA-based INT8 GEMM kernel for CUDA and PyTorch. It is designed as a compact, production-style example of GPU kernel engineering, systems integration, correctness validation, and performance analysis.
 
 ## Demonstrated Capabilities
