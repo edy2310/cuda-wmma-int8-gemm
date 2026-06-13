@@ -22,7 +22,7 @@ Python
   -> FP16 output
 ```
 
-The flow is intentionally small and explicit so each layer can be inspected independently during debugging, profiling, or integration work.
+The flow is intentionally small and explicit so each layer can be inspected independently during debugging, profiling, or integration work. Python exposes the public API through `gemm_api.wmma_int8_gemm`. The C++ binding validates dtype, rank, contiguity, and device placement before dispatching. The CUDA launcher allocates the FP16 output tensor, resolves the device pointers, and launches on PyTorch's active CUDA stream. The WMMA kernel performs the INT8 Tensor Core multiply-accumulate, applies per-channel dequantization, and writes the final FP16 result.
 
 ### Memory Layout
 
